@@ -1,0 +1,76 @@
+run-name: Apply change to GKE from ${{ github.head_ref }} by ${{ github.actor }}
+
+name: Apply approved GKE changes
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  get-environment:
+    name: Get environment
+    outputs:
+      runner_env: ${{ steps.identify-environment.outputs.runner_environment }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: "read"
+      id-token: "write"
+
+    steps:
+    - name: Get repo files
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set environment
+      id: identify-environment
+      run: |-
+        runner_env=$(git diff @~1 @ | grep -E '^\+' | grep -E '^\+\+\+ b/' | sed -E 's/^\+\+\+ b\///' | sed 's|\(.*\)/.*|\1|' |sort -u| cut -f 2 -d '/' | sort -u |grep -v "workflows")
+        echo "runner_environment=$runner_env" >> $GITHUB_OUTPUT
+
+
+  start-k8s-manifest-runner:
+    name: Start k8s-manifest runner
+    needs: [get-environment]
+    env:
+      RUNNER_ENVIRONMENT: ${{ needs.get-environment.outputs.runner_env }}
+    runs-on: [ "self-hosted", "org-${{ needs.get-environment.outputs.runner_env }}" ]
+    permissions:
+      contents: "read"
+      id-token: "write"
+
+    steps:
+    - name: Check k8s-manifest replica count
+      if: ${{ job.status == 'success' }}
+      run: |-
+        echo "environment is ${{ env.RUNNER_ENVIRONMENT }}"
+        REPLICAS=$(kubectl get deployment my-runner -n my-runner-namespace -o jsonpath='{.spec.replicas}')
+        if [ $REPLICAS -eq 0 ]; then
+          kubectl scale deployment -n my-runner-namespace my-runner --replicas=1
+        else
+           echo "my-runner is already running"
+        fi
+
+  check-differences:
+    name: Check differences
+    needs: [get-environment, start-k8s-manifest-runner]
+    runs-on: [ "self-hosted", "${{ needs.get-environment.outputs.runner_env }}" ]
+    permissions:
+      contents: "read"
+      id-token: "write"
+
+    steps:
+    - name: Get repo files
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Apply directories with changes
+      run: |-
+        DIRECTORIES=$(git diff @~1 @ | grep -E '^\+' | grep -E '^\+\+\+ b/' | sed -E 's/^\+\+\+ b\///' | sed 's|\(.*\)/.*|\1|' |sort -u| grep -v "workflows")
+        for dir in $DIRECTORIES; do
+          echo "Directory: $dir"
+          kustomize build $dir | kubectl apply -f -
+        done
+

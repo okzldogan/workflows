@@ -1,0 +1,60 @@
+run-name: Run terraform plan from ${{ github.head_ref }}${{ github.ref_name }} by ${{ github.actor }}
+
+name: Get tf plan output
+
+on:
+  pull_request:
+
+
+jobs:
+  build:
+    name: "Run Terraform Plan"
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: "read"
+      id-token: "write"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+
+      - id: auth
+        name: 'Authenticate to Google Cloud'
+        uses: 'google-github-actions/auth@v2'
+        with:
+          token_format: "access_token"
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER_ID }}
+          service_account: ${{ secrets.TF_SERVICE_ACCOUNT }}
+          access_token_lifetime: '600s'
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+
+      - name: Terraform plan
+        id: tf-plan
+        run: |
+          CHANGED_DIRS=$(git diff --name-only origin/main| sed 's|\(.*\)/.*|\1|' |sort -u|grep -v "modules"|grep -v "github")
+          MAIN_DIR=$(pwd)
+          echo changed directories are: $CHANGED_DIRS
+          for folder in $CHANGED_DIRS; do
+            echo "------------------------"
+            cd $MAIN_DIR
+            echo "Moving to Folder $folder"
+            cd $folder
+            echo "Running terraform init from the folder $folder"
+            terraform init -upgrade
+            terraform plan -out=tfplan -input=false | grep -v "state" 
+            terraform show tfplan >> $MAIN_DIR/tfplan.txt
+          done
+
+      - name: Print the result of tfplan.txt
+        run: cat tfplan.txt
+
+          
