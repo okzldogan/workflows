@@ -1,0 +1,87 @@
+run-name: Run kubectl diff from ${{ github.head_ref }} by ${{ github.actor }}
+
+name: Get changes planned in GKE
+
+on:
+  pull_request:
+
+jobs:
+  get-environment:
+    name: Get environment
+    outputs:
+      runner_env: ${{ steps.identify-environment.outputs.runner_environment }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: "read"
+      id-token: "write"
+
+    steps:
+    - name: Get repo files
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set environment
+      id: identify-environment
+      run: |-
+        runner_env=$(git diff --name-only origin/main | cut -f 2 -d '/' |sort -u| grep -v "workflows")
+        echo "runner_environment=$runner_env" >> $GITHUB_OUTPUT
+
+
+  start-k8s-manifest-runner:
+    name: Start k8s-manifest runner
+    needs: [get-environment]
+    env:
+      RUNNER_ENVIRONMENT: ${{ needs.get-environment.outputs.runner_env }}
+    runs-on: [ "self-hosted", "org-${{ needs.get-environment.outputs.runner_env }}" ]
+    permissions:
+      contents: "read"
+      id-token: "write"
+
+    steps:
+    - name: Check k8s-manifest replica count
+      if: ${{ job.status == 'success' }}
+      run: |-
+        echo "environment is ${{ env.RUNNER_ENVIRONMENT }}"
+        REPLICAS=$(kubectl get deployment runner-k8s-manifests -n github-runner -o jsonpath='{.spec.replicas}')
+        if [ $REPLICAS -eq 0 ]; then
+          kubectl scale deployment -n github-runner runner-k8s-manifests --replicas=1
+        else
+           echo "k8s-manifests runner is already running"
+        fi
+
+  check-differences:
+    name: Check differences
+    needs: [get-environment, start-k8s-manifest-runner]
+    runs-on: [ "self-hosted", "${{ needs.get-environment.outputs.runner_env }}" ]
+    permissions:
+      contents: "read"
+      id-token: "write"
+
+    steps:
+    - name: Get repo files
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Get directories with changes
+      run: |-
+        DIRECTORIES=$(git diff --name-only origin/main| sed 's/\/[^/]*$//'| sort -u| grep -v "workflows")
+        if [ -z "$DIRECTORIES" ]; then
+          echo "No changes in k8s manifests"
+        else
+          for dir in $DIRECTORIES; do
+            echo "Directory: $dir" >> gke-changes.txt
+            kustomize build $dir | kubectl diff -f - | grep -E '^\+|^\-'| grep -v '/tmp'| grep -v 'generation' >> gke-changes.txt
+            echo "-------------------" >> gke-changes.txt
+          done
+        fi
+
+    - name: Print the result of gke-changes.txt
+      run: |
+        if [ ! -s gke-changes.txt ]; then
+          echo "No changes identified for GKE"
+        else
+          cat gke-changes.txt
+        fi
+
